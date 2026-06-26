@@ -68,12 +68,25 @@ function Hero() {
   );
 }
 
+// ─── constantes de polling ────────────────────────────────────────────────────
+const POLL_INTERVAL_MS = 5_000;   // checar a cada 5s
+const POLL_MAX_ATTEMPTS = 36;     // timeout total: 3 minutos
+
+// ─── labels amigáveis por exercício ──────────────────────────────────────────
+const EXERCISE_LABELS = {
+  desenvolvimento:  'Desenvolvimento de Ombro',
+  elevacaoLateral:  'Elevação Lateral',
+  biceps:           'Rosca Direta',
+  agachamento:      'Agachamento',
+};
+
 function Uploader() {
-  const [status, setStatus] = useState(STATUS.IDLE);
-  const [file, setFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [dragging, setDragging] = useState(false);
-  const [result, setResult] = useState(null);
+  const [status, setStatus]           = useState(STATUS.IDLE);
+  const [analyzeStep, setAnalyzeStep] = useState('');   // mensagem de progresso
+  const [file, setFile]               = useState(null);
+  const [previewUrl, setPreviewUrl]   = useState(null);
+  const [dragging, setDragging]       = useState(false);
+  const [result, setResult]           = useState(null);
   const [durationError, setDurationError] = useState(false);
   const inputRef = useRef(null);
 
@@ -111,26 +124,86 @@ function Uploader() {
     setPreviewUrl(null);
     setResult(null);
     setDurationError(false);
+    setAnalyzeStep('');
     setStatus(STATUS.IDLE);
     if (inputRef.current) inputRef.current.value = '';
   };
 
+  // ── polling: chama GET /result/{fileId} até receber status 200 ─────────────
+  const pollResult = async (fileId) => {
+    const baseUrl = import.meta.env.VITE_RESULT_API_URL;
+    setAnalyzeStep('Aguardando análise pelo modelo de IA…');
+
+    for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+      try {
+        const res = await fetch(`${baseUrl}/${fileId}`);
+
+        if (res.status === 202) {
+          // ainda processando — atualiza mensagem de progresso
+          const elapsed = Math.round(((attempt + 1) * POLL_INTERVAL_MS) / 1000);
+          setAnalyzeStep(`Processando… ${elapsed}s`);
+          continue;
+        }
+
+        if (res.ok) {
+          const data = await res.json();
+          const exerciseLabel = EXERCISE_LABELS[data.exercicio] ?? data.exercicio ?? '—';
+          const isCorrect     = data.execucao === 'correta';
+
+          setResult({
+            correct:  isCorrect,
+            exercise: exerciseLabel,
+            execution: data.execucao,
+            message:  data.mensagem ?? (isCorrect ? 'Execução correta!' : 'Execução com erros — revise a técnica.'),
+            status:   data.status,
+          });
+          setStatus(STATUS.DONE);
+          return;
+        }
+
+        // erro HTTP inesperado
+        throw new Error(`Resposta inesperada do servidor (${res.status})`);
+
+      } catch (err) {
+        setResult({ correct: false, message: `Erro ao consultar resultado: ${err.message}` });
+        setStatus(STATUS.DONE);
+        return;
+      }
+    }
+
+    // timeout
+    setResult({ correct: false, message: 'O tempo de análise esgotou. Tente novamente com um vídeo mais curto.' });
+    setStatus(STATUS.DONE);
+  };
+
+  // ── fluxo principal: presigned URL → PUT no S3 → polling ──────────────────
   const analyze = async () => {
     setStatus(STATUS.ANALYZING);
+    setAnalyzeStep('Preparando upload…');
+
     try {
-      const res = await fetch(import.meta.env.VITE_UPLOAD_API_URL, {
+      // 1. Solicitar presigned URL
+      const uploadRes = await fetch(import.meta.env.VITE_UPLOAD_API_URL, {
         method: 'POST',
-        headers: { 'Content-Type': file.type },
+      });
+      if (!uploadRes.ok) throw new Error(`Falha ao obter URL de upload (${uploadRes.status})`);
+
+      const { upload_url, file_id } = await uploadRes.json();
+
+      // 2. Enviar o vídeo diretamente para o S3
+      setAnalyzeStep('Enviando vídeo…');
+      const s3Res = await fetch(upload_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'video/mp4' },
         body: file,
       });
-      if (!res.ok) throw new Error(`Erro ${res.status} ao enviar o vídeo`);
-      const data = await res.json();
-      setResult({
-        correct: true,
-        message: data.message ?? 'Vídeo enviado com sucesso.',
-        fileId: data.file,
-      });
-      setStatus(STATUS.DONE);
+      if (!s3Res.ok) throw new Error(`Falha no upload para o S3 (${s3Res.status})`);
+
+      // 3. Polling do resultado
+      await pollResult(file_id);
+
     } catch (err) {
       setResult({ correct: false, message: `Erro: ${err.message}` });
       setStatus(STATUS.DONE);
@@ -205,9 +278,14 @@ function Uploader() {
             )}
 
             {status === STATUS.ANALYZING && (
-              <div className="flex items-center justify-center gap-3 py-3 text-sm text-neutral-400">
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
-                Analisando execução…
+              <div className="space-y-3 py-3">
+                <div className="flex items-center justify-center gap-3 text-sm text-neutral-400">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+                  {analyzeStep || 'Analisando execução…'}
+                </div>
+                <div className="mx-4 h-1 overflow-hidden rounded-full bg-white/5">
+                  <div className="h-full w-full animate-[shimmer_1.5s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-transparent via-accent/40 to-transparent bg-[length:200%_100%]" />
+                </div>
               </div>
             )}
 
@@ -231,10 +309,19 @@ function Uploader() {
                     {result.correct ? 'Execução correta' : 'Precisa de ajustes'}
                   </span>
                 </div>
-                <p className="mt-2 text-sm leading-relaxed text-neutral-300">{result.message}</p>
-                {result.fileId && (
-                  <p className="mt-1 font-mono text-xs text-neutral-500">{result.fileId}</p>
+
+                {/* exercício identificado */}
+                {result.exercise && (
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className="text-xs text-neutral-500">Exercício identificado</span>
+                    <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs font-medium text-neutral-200">
+                      {result.exercise}
+                    </span>
+                  </div>
                 )}
+
+                <p className="mt-2 text-sm leading-relaxed text-neutral-300">{result.message}</p>
+
                 <button onClick={reset} className="mt-3 text-xs text-neutral-400 transition hover:text-neutral-200">
                   Enviar outro vídeo →
                 </button>
