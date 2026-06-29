@@ -75,7 +75,7 @@ const POLL_MAX_ATTEMPTS = 36;     // timeout total: 3 minutos
 // ─── labels amigáveis por exercício ──────────────────────────────────────────
 const EXERCISE_LABELS = {
   desenvolvimento:  'Desenvolvimento de Ombro',
-  elevacaoLateral:  'Elevação Lateral',
+  elevacao_lateral: 'Elevação Lateral',
   biceps:           'Rosca Direta',
   agachamento:      'Agachamento',
 };
@@ -156,7 +156,7 @@ function Uploader() {
             correct:  isCorrect,
             exercise: exerciseLabel,
             execution: data.execucao,
-            message:  data.mensagem ?? (isCorrect ? 'Execução correta!' : 'Execução com erros — revise a técnica.'),
+            message:  data.mensagem ?? (isCorrect ? 'Execução correta!' : 'Execução com erros. Revise a técnica do exercício.'),
             status:   data.status,
           });
           setStatus(STATUS.DONE);
